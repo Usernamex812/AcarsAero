@@ -1,3 +1,4 @@
+
 export default {
   async fetch(request) {
     const url = new URL(request.url);
@@ -29,7 +30,8 @@ export default {
         status: "online",
         endpoint: "/aircraft?lat=39.10&lon=-84.51&radius=50",
         radiusUnit: "nautical miles",
-        maxRadius: 250
+        maxRadius: 250,
+        providers: ["Airplanes.live", "ADS-B.lol"]
       });
     }
 
@@ -42,7 +44,8 @@ export default {
     const radius = Number(url.searchParams.get("radius") ?? 50);
 
     if (
-      !Number.isFinite(lat) || !Number.isFinite(lon) ||
+      !Number.isFinite(lat) ||
+      !Number.isFinite(lon) ||
       !Number.isFinite(radius) ||
       lat < -90 || lat > 90 ||
       lon < -180 || lon > 180 ||
@@ -55,37 +58,80 @@ export default {
       }, 400);
     }
 
-    const upstream =
-      `https://api.adsb.lol/v2/lat/${lat}/lon/${lon}/dist/${radius}`;
-
-    try {
-      const response = await fetch(upstream, {
-        headers: { "Accept": "application/json" },
-        signal: AbortSignal.timeout(10000)
-      });
-
-      if (!response.ok) {
-        return respond({
-          error: "Aircraft data provider returned an error.",
-          providerStatus: response.status
-        }, 502);
+    const providers = [
+      {
+        name: "Airplanes.live",
+        url: `https://api.airplanes.live/v2/lat/${lat}/lon/${lon}/dist/${radius}`
+      },
+      {
+        name: "ADS-B.lol",
+        url: `https://api.adsb.lol/v2/lat/${lat}/lon/${lon}/dist/${radius}`
       }
+    ];
 
-      const data = await response.json();
-      const aircraft = data.aircraft ?? [];
+    let emptyResult = null;
+    const errors = [];
 
-      return respond({
-        source: "ADS-B.lol",
-        center: { lat, lon },
-        radius,
-        fetchedAt: new Date().toISOString(),
-        count: aircraft.length,
-        aircraft
-      });
-    } catch {
-      return respond({
-        error: "Unable to retrieve aircraft data. Try again shortly."
-      }, 502);
+    for (const provider of providers) {
+      try {
+        const response = await fetch(provider.url, {
+          headers: {
+            "Accept": "application/json",
+            "User-Agent": "AcarsAero/1.0"
+          },
+          signal: AbortSignal.timeout(10000)
+        });
+
+        if (!response.ok) {
+          errors.push({
+            provider: provider.name,
+            status: response.status
+          });
+          continue;
+        }
+
+        const data = await response.json();
+        const aircraft = Array.isArray(data.ac)
+          ? data.ac
+          : Array.isArray(data.aircraft)
+            ? data.aircraft
+            : [];
+
+        if (aircraft.length > 0) {
+          return respond({
+            source: provider.name,
+            center: { lat, lon },
+            radius,
+            fetchedAt: new Date().toISOString(),
+            count: aircraft.length,
+            aircraft
+          });
+        }
+
+        emptyResult = {
+          source: provider.name,
+          center: { lat, lon },
+          radius,
+          fetchedAt: new Date().toISOString(),
+          count: 0,
+          aircraft: []
+        };
+      } catch {
+        errors.push({
+          provider: provider.name,
+          error: "Request failed or timed out."
+        });
+      }
     }
+
+    if (emptyResult && errors.length < providers.length) {
+      return respond(emptyResult);
+    }
+
+    return respond({
+      error: "All aircraft data providers failed.",
+      providers: errors,
+      message: "Try again shortly."
+    }, 502);
   }
 };
